@@ -21,3 +21,12 @@
 *.i*86
 *.x86_64
 *.hex
+
+# Eclipse crap
+*.project
+
+# Geany
+*.geany
+
+# Bin
+bin/*.luvit
