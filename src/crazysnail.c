@@ -1053,8 +1053,13 @@ static int lua_client_new(lua_State *L) {
 }
 
 
-static const struct luaL_Reg methods[] = {
+static const struct luaL_Reg functions[] = {
   {"new", lua_client_new},
+  {NULL, NULL}
+};
+
+
+static const struct luaL_Reg methods[] = {
   {"on", lua_client_on},
   {"connect", lua_client_connect},
   {"disconnect", lua_client_disconnect},
@@ -1069,9 +1074,13 @@ int luaopen_crazysnail(lua_State *L) {
 
   luaL_newmetatable(L, LUA_CLIENT_MT);
   luaL_register(L, NULL, methods);
+  luaL_register(L, NULL, functions);
+  //lua_pop(L, 1);
   lua_pushvalue(L, -1);
   lua_setfield(L, -2, "__index");
   
+  //lua_newtable(L);
+  //luaL_register(L, NULL, functions);
   return 1;
 }
 
