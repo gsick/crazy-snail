@@ -136,7 +136,7 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
 		        cb->flags |= CALLBACK_INITIALIZED;
 			    }
           /* Call Callback */
-			    if (!cc->ignore_sub_reply && done == 1) {
+			    if (!cc->ignore_sub_cmd_reply && done == 1) {
 			      lua_State *L = cc->L;
             lua_rawgeti(L, LUA_REGISTRYINDEX, temp->cb->ref);
             
@@ -982,7 +982,7 @@ static int lua_client_new(lua_State *L) {
 #endif
   client_context_t *cc;
   const char *path;
-  bool ignore_sub_reply;
+  bool ignore_sub_cmd_reply = true;
 
   // check if table
   luaL_checktype(L, 1, LUA_TTABLE);
@@ -994,16 +994,18 @@ static int lua_client_new(lua_State *L) {
   path = luaL_checkstring(L, -1);
   lua_pop(L,1);
   /* Ignore sub reply */
-  lua_pushstring(L, "ignore_sub_reply");
+  lua_pushstring(L, "ignore_sub_cmd_reply");
   lua_gettable(L, -2 );
-  ignore_sub_reply = lua_toboolean(L, -1);
+  if (lua_isboolean(L, -1)) {
+    ignore_sub_cmd_reply = lua_toboolean(L, -1);
+  }
   lua_pop(L,1);
 
   /* Initialize Context */
   cc = (client_context_t*)
          lua_newuserdata(L, sizeof(client_context_t));
   cc->path = strdup(path);
-  cc->ignore_sub_reply = ignore_sub_reply;
+  cc->ignore_sub_cmd_reply = ignore_sub_cmd_reply;
   cc->stream = NULL;
   cc->sub_stream = NULL;
   cc->L = L;
