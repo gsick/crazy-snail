@@ -253,7 +253,7 @@ static int push_sub_reply(lua_State *L, redisReply *redisReply) {
 
       for (i = tweak ? 1 : 0; i < redisReply->elements; ++i) {
         push_sub_reply(L, redisReply->element[i]);
-        lua_rawseti(L, -2, i + 1); /* Store sub-reply */
+        lua_rawseti(L, -2, i + (tweak ? 0 : 1)); /* Store sub-reply */
       }
 
       break;
