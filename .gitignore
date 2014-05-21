@@ -31,3 +31,6 @@
 # Bin
 bin
 bin/*.luvit
+
+# Test
+test/tmp
