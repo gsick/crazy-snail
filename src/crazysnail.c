@@ -1,10 +1,30 @@
+/*
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2014 gsick
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
 
-/* gcc -g -o crazy-snail crazy-snail.c ../deps/libuv/out/Debug/libuv.a -I/usr/local/include -L/usr/local/lib -llua -lm -ldl -pthread */
-/* gcc -O2 -fpic -c -o crazy-snail.o crazy-snail.c ../deps/libuv/out/Debug/libuv.a -I/usr/local/include -L/usr/local/lib -llua -lm -ldl -pthread */
-/* gcc -O -shared -fpic -o crazy-snail.so crazy-snail.o */
-
-//good one
-/* gcc -g -fpic -o ../bin/crazysnail.luvit crazysnail.c -I/usr/local/include -L/usr/local/lib -lm -ldl -luv -pthread -share */
+/*
+ * Some part of code are largely inspired from Hiredis (https://github.com/redis/hiredis)
+ * and luvit-redis (https://github.com/tadeuszwojcik/luvit-redis)
+ */
 
 #include <assert.h>
 #include <ctype.h>
@@ -12,7 +32,6 @@
 #include <lualib.h>
 #include <lauxlib.h>
 #include <math.h>
-//#include "./../deps/libuv/include/uv.h"
 #include <uv.h>
 #include <signal.h>
 #include <stdbool.h>

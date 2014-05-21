@@ -3,11 +3,14 @@ crazy-snail
 
 Real-Time Luvit module based on [Redis](http://redis.io/).<br />
 This module is optimized for [Redis Keyspace Notifications](http://redis.io/topics/notifications) 
-via Unix Domain Socket. For basic Redis usage you may use [luvit-redis](https://github.com/tadeuszwojcik/luvit-redis)<br />
+via Unix Domain Socket.<br />
+For basic Redis usage you may use [luvit-redis](https://github.com/tadeuszwojcik/luvit-redis)<br />
 It assume that your redis.conf is well configured.<br />
 
 Motivations:<br />
-Hiredis doesn't allow many subscription callback on the same key for the same client.
+Hiredis doesn't allow many subscription callback on the same key for the same client.<br />
+Have timer interval event.<br />
+Launch Redis LUA script on key notification.<br />
 
 ## Table of Contents
 
@@ -68,6 +71,22 @@ snail:on('connect', function()
     if not err then
       -- Do something every 1000ms or on Key1, Key4, Key5, expire events
     end
+  end)
+
+   -- Script subscription
+  local script
+  snail:command("script", "load", [[ return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]} ]], function(err, res)
+    if not err then 
+      script = res
+    end
+  end)
+
+  snail:subscribe(10000, "Key1", function(err, res)
+    snail:command("EVALSHA", script, 2, "a", "b", 2, 3, function(err, res)
+      if err then 
+        print(err)
+      end
+    end)
   end)
 
 end):on('error', function(err)
