@@ -28,7 +28,7 @@ snail:on('connect', function()
     snail:command("get", res[1], function(err, res)
       assert(type(res) == "string")
       assert(tonumber(res) == i)
-      if i > 10 then
+      if i >= 10 then
         t:stop()
         snail:disconnect()
       end

@@ -1,4 +1,4 @@
-LUVIT = luvit
+LUVIT = /usr/local/bin/luvit
 CFLAGS  = $(shell $(LUVIT) --cflags | sed s/-Werror//)
 LIBS    = $(shell $(LUVIT) --libs)
 #-DLUA_STACK_CHECK
