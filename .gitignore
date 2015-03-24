@@ -6,3 +6,6 @@
 
 # Build
 build
+
+# Tests
+tests/deps/crazy-snail
