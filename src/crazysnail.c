@@ -32,17 +32,16 @@
 #include <lualib.h>
 #include <lauxlib.h>
 #include <math.h>
-#include <uv.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "uv.h"
 #include "cb.h"
 #include "crazysnail.h"
 #include "hiredis-light.h"
-#include "luv_handle.h"
 #include "sds.h"
 
 #define LUA_CLIENT_MT "lua.crazy.snail.client"
@@ -55,21 +54,21 @@
 #define NB_EVENTS 35
 
 static char *events[] = {
-	"append", "del", 
+	"append", "del",
 	"expire", "evicted",
-	"incrby", "incrbyfloat", 
+	"incrby", "incrbyfloat",
 	"hdel", "hincrby", "hincrbyfloat", "hset",
 	"linsert", "lpop", "lpush", "lset", "ltrim",
 	"rename_from", "rename_to", "rpop", "rpush",
-	"sadd", "sdiffstore", "set", "setrange", 
+	"sadd", "sdiffstore", "set", "setrange",
   "sinterstore", "sortstore", "spop", "srem", "sunionostore",
-	"zadd", "zincr", "zinterstore", "zrem", "zrembyrank", 
+	"zadd", "zincr", "zinterstore", "zrem", "zrembyrank",
   "zrembyscore", "zunionstore"};
 
 static req_list_t* req_freelist = NULL;
 static buf_list_t* buf_freelist = NULL;
 
-static uv_buf_t buf_alloc(uv_handle_t* handle, size_t size);
+static void buf_alloc(uv_handle_t* handle, size_t size, uv_buf_t* buf);
 static void buf_free(const uv_buf_t* buf);
 static uv_req_t* req_alloc(void);
 static void req_free(uv_req_t* uv_req);
@@ -79,7 +78,26 @@ static void stackDump(lua_State *L);
 static void on_disconnect(uv_handle_t* handle);
 static int push_reply(lua_State *L, redisReply *redisReply);
 static int push_sub_reply(lua_State *L, redisReply *redisReply);
-static void on_timer(uv_timer_t* handle, int status);
+static void on_timer(uv_timer_t* handle);
+
+/* Pushes an error object onto the stack */
+void luv_push_async_error_raw(lua_State* L, const char *code, const char *msg, const char* source, const char* path) {
+  lua_newtable(L);
+  lua_getglobal(L, "errorMeta");
+  lua_setmetatable(L, -2);
+  if (path) {
+    lua_pushstring(L, path);
+    lua_setfield(L, -2, "path");
+    lua_pushfstring(L, "%s, %s '%s'", code, msg, path);
+  } else {
+    lua_pushfstring(L, "%s, %s", code, msg);
+  }
+  lua_setfield(L, -2, "message");
+  lua_pushstring(L, code);
+  lua_setfield(L, -2, "code");
+  lua_pushstring(L, source);
+  lua_setfield(L, -2, "source");
+}
 
 static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
 
@@ -89,7 +107,7 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
   bool pvariant;
   char *stype;
   sds sname;
- 
+
   /* Custom reply functions are not supported for pub/sub. This will fail
    * very hard when they are used... */
   if (reply->type == REDIS_REPLY_ARRAY) {
@@ -111,7 +129,7 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
     assert(reply->element[1]->type == REDIS_REPLY_STRING);
     sname = sdsnewlen(reply->element[1]->str,reply->element[1]->len);
     search(sname, callbacks, &cb_list);
-        
+
     /* Set flags */
     callback_ll_t *temp = cb_list->head;
     assert(temp != NULL);
@@ -119,37 +137,44 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
     int init = strcmp(pvariant ? stype + 1 : stype, "subscribe");
     if (init == 0) {
       int done = 0;
-       /* Find the right callback to call 
+       /* Find the right callback to call
         * It is a sub ok reply, we don't want call all callback */
       while (done == 0 && temp != NULL) {
 		    callback_t *cb = temp->cb;
 		    if (!(cb->flags & CALLBACK_INITIALIZED)) {
 			    int i, all;
 			    all = CHANNEL_SUBSCRIBED;
-	        /* Find the right channel */		  
+	        /* Find the right channel */
           for (i = 0; i <= cb->nb_channel - 1; i++) {
             channel_t *ch = cb->channels[i];
             if (!(ch->flags & CHANNEL_SUBSCRIBED)) {
-              if (done == 0 && !(ch->flags & CHANNEL_TIMER_EVENT) 
+              if (done == 0 && !(ch->flags & CHANNEL_TIMER_EVENT)
                   && strcmp(ch->name, sname) == 0) {
                 /* Set initialized */
 			          ch->flags |= CHANNEL_SUBSCRIBED;
 				        done = 1;
 			        } else if ((ch->flags & CHANNEL_TIMER_EVENT)) {
+								/* Get the uv loop */
+								uv_loop_t* loop;
+								lua_pushstring(cc->L, "uv_loop");
+								lua_rawget(cc->L, LUA_REGISTRYINDEX);
+								loop = lua_touserdata(cc->L, -1);
                 /* Start timer */
                 search_timer(ch->ikey, cc->timers, &leaf);
                 uv_timer_t* timer_req = (uv_timer_t*)req_alloc();
                 timer_req->data = cc;
-                uv_timer_init(uv_default_loop(), timer_req);
-                uv_timer_start(timer_req, on_timer, 0, ch->ikey);
+                int r = uv_timer_init(loop, timer_req);
+								assert(r == 0);
+                r = uv_timer_start(timer_req, on_timer, 0, ch->ikey);
+								assert(r == 0);
                 ch->flags |= CHANNEL_SUBSCRIBED;
                 leaf->data = timer_req;
               }
             }
-            
+
 			      all &= ch->flags;
           }
-          /* If all channels are initialized, 
+          /* If all channels are initialized,
            * the callback is initialized */
           if(all & CHANNEL_SUBSCRIBED) {
 		        cb->flags |= CALLBACK_INITIALIZED;
@@ -158,7 +183,7 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
 			    if (!cc->ignore_sub_cmd_reply && done == 1) {
 			      lua_State *L = cc->L;
             lua_rawgeti(L, LUA_REGISTRYINDEX, temp->cb->ref);
-            
+
             lua_pushnil(L);
             int argc = push_sub_reply(L, reply);
             lua_pcall(cc->L, argc + 1, 0, 0);
@@ -168,10 +193,10 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
       }
     } else {
      while(temp != NULL) {
-			
+
         lua_State *L = cc->L;
         lua_rawgeti(L, LUA_REGISTRYINDEX, temp->cb->ref);
-            
+
         if (!(temp->cb->flags & CALLBACK_INITIALIZED)) {
 			    lua_pushstring(cc->L, "event received but not initialized");
 			    lua_pcall(cc->L, 1, 0, 0);
@@ -184,7 +209,7 @@ static int get_and_call_sub_cb(client_context_t* cc, redisReply *reply) {
      }
    }
 
-        
+
         /*
         if (de != NULL) {
             memcpy(dstcb,dictGetEntryVal(de),sizeof(*dstcb));
@@ -229,14 +254,14 @@ static int push_sub_reply(lua_State *L, redisReply *redisReply) {
       break;
 
     case REDIS_REPLY_STRING: {
-      
+
       if (!tweak) {
         lua_pushlstring(L, redisReply->str, redisReply->len);
         break;
       }
         int key_space_prefix_len = strlen(KEY_SPACE);
         int key_event_prefix_len = strlen(KEY_EVENT);
-        
+
         if (strncmp(redisReply->str, KEY_SPACE, key_space_prefix_len) == 0) {
           lua_pushlstring(L, redisReply->str + key_space_prefix_len, redisReply->len - key_space_prefix_len);
         } else if (strncmp(redisReply->str, KEY_EVENT, key_event_prefix_len) == 0) {
@@ -308,11 +333,10 @@ static int push_reply(lua_State *L, redisReply *redisReply) {
   return 1;
 }
 
-
-static void on_timer(uv_timer_t* handle, int status) {
+static void on_timer(uv_timer_t* handle) {
 
   client_context_t* cc = (client_context_t*)handle->data;
-  
+
   if (cc->flags & REDIS_DISCONNECTING) {
     return;
   }
@@ -346,21 +370,21 @@ static void on_timer(uv_timer_t* handle, int status) {
 }
 
 
-static void on_read(uv_stream_t* stream, ssize_t nread, uv_buf_t buf) {
+static void on_read(uv_stream_t* stream, ssize_t nread, const uv_buf_t* buf) {
 
   client_context_t* cc = (client_context_t*)stream->data;
   bool sub_mode = (cc->sub_stream == stream);
 
-if (cc->flags & REDIS_DISCONNECTING) {
-  buf_free(&buf);
-  return;
-}
+  if (cc->flags & REDIS_DISCONNECTING) {
+    buf_free(buf);
+    return;
+  }
 
   /* Error or connection closed by server */
   if (nread < 0) {
     /* Call Error Callback */
     if (cc->r_error_cb != LUA_NOREF && cc->r_error_cb != LUA_REFNIL) {
-      const char* error = uv_strerror(uv_last_error(uv_default_loop()));
+      const char* error = uv_strerror(nread);
       lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cc->r_error_cb);
       lua_pushstring(cc->L, error);
       lua_pcall(cc->L, 1, 0, 0);
@@ -371,18 +395,18 @@ if (cc->flags & REDIS_DISCONNECTING) {
   }
 
   if (nread > 0) {
-    if (redisReaderFeed(cc->reader,buf.base,nread) != REDIS_OK) {
+    if (redisReaderFeed(cc->reader,buf->base,nread) != REDIS_OK) {
       /* Call Error Callback */
       if (cc->r_error_cb != LUA_NOREF && cc->r_error_cb != LUA_REFNIL) {
         lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cc->r_error_cb);
         lua_pushstring(cc->L, cc->reader->errstr);
         lua_pcall(cc->L, 1, 0, 0);
       }
-      buf_free(&buf);
+      buf_free(buf);
       return;
     }
 
-    buf_free(&buf);
+    buf_free(buf);
 
     callback_t cb;
     void *reply = NULL;
@@ -408,7 +432,7 @@ if (cc->flags & REDIS_DISCONNECTING) {
          * trying to get replies and wait for the next loop tick. */
         break;
       }
-      
+
       if (sub_mode) {
 	      if (((redisReply*)reply)->type == REDIS_REPLY_ERROR) {
 		      // disconnect??
@@ -427,11 +451,11 @@ if (cc->flags & REDIS_DISCONNECTING) {
 	        lua_State *L = cc->L;
           lua_rawgeti(L, LUA_REGISTRYINDEX, cb.ref);
           luaL_unref(L, LUA_REGISTRYINDEX, cb.ref);
-    
+
           lua_pushnil(L);
           int argc = push_reply(L, reply);
           lua_pcall(L, argc + 1, 0, 0);
-  
+
           cc->reader->fn->freeObject(reply);
 		    } else {
           /* No callback for this reply. This can either be a NULL callback,
@@ -439,10 +463,10 @@ if (cc->flags & REDIS_DISCONNECTING) {
            * abort with an error, but simply ignore it because the client
            * doesn't know what the server will spit out over the wire. */
            cc->reader->fn->freeObject(reply);
-        }  
+        }
 	    }
     }
-    
+
     if (reply != NULL) {
       cc->reader->fn->freeObject(reply);
     }
@@ -453,7 +477,7 @@ if (cc->flags & REDIS_DISCONNECTING) {
   }
 
   /* Not subscribed context or No more callback */
-  if (!sub_mode 
+  if (!sub_mode
       && cc->command_cb_list->head == NULL) {
     uv_read_stop(stream);
   }
@@ -473,7 +497,7 @@ static void on_write(uv_write_t* handle, int status) {
     callback_t cb;
     if (shift_cb(&cc->command_cb_list, &cb) == 0) {
       if (cb.ref != LUA_NOREF && cb.ref != LUA_REFNIL) {
-        const char* error = uv_strerror(uv_last_error(uv_default_loop()));
+        const char* error = uv_strerror(status);
         lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cb.ref);
         luaL_unref(cc->L, LUA_REGISTRYINDEX, cb.ref);
         lua_pushstring(cc->L, error);
@@ -488,11 +512,11 @@ static void on_write(uv_write_t* handle, int status) {
   int r = uv_read_start(stream, buf_alloc, on_read);
   if (r < 0) {
     /* Call Callback */
-    const char* error = uv_strerror(uv_last_error(uv_default_loop()));
+    const char* error = uv_strerror(r);
     // TODO not the right cb in substream, false in sub stream
     callback_t cb;
     if ( shift_cb(&cc->command_cb_list, &cb) == 0 ) {
-       
+
       if (cb.ref != LUA_NOREF && cb.ref != LUA_REFNIL) {
         lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cb.ref);
         luaL_unref(cc->L, LUA_REGISTRYINDEX, cb.ref);
@@ -515,7 +539,7 @@ static void on_connect(uv_connect_t* handle, int status) {
   if (status < 0) {
     /* Call Error Callback */
     if (cc->r_error_cb != LUA_NOREF && cc->r_error_cb != LUA_REFNIL) {
-      const char* error = uv_strerror(uv_last_error(uv_default_loop()));
+      const char* error = uv_strerror(status);
       lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cc->r_error_cb);
       lua_pushstring(cc->L, error);
       lua_pcall(cc->L, 1, 0, 0);
@@ -527,18 +551,18 @@ static void on_connect(uv_connect_t* handle, int status) {
     return;
   }
   assert(status == 0);
-  
+
   if (!(cc->stream_flags & STREAM_CONNECTED)) {
     cc->stream_flags |= STREAM_CONNECTED;
-  } else if ((cc->stream_flags & STREAM_CONNECTED) 
+  } else if ((cc->stream_flags & STREAM_CONNECTED)
       && !(cc->stream_flags & SUB_STREAM_CONNECTED)) {
     cc->stream_flags |= SUB_STREAM_CONNECTED;
   }
-  
-  if ((cc->stream_flags & STREAM_CONNECTED) 
+
+  if ((cc->stream_flags & STREAM_CONNECTED)
       && (cc->stream_flags & SUB_STREAM_CONNECTED)) {
     cc->flags |= REDIS_CONNECTED;
-  
+
     /* Call Connect Callback */
     if (cc->r_connect_cb != LUA_NOREF && cc->r_connect_cb != LUA_REFNIL) {
       lua_rawgeti(cc->L, LUA_REGISTRYINDEX, cc->r_connect_cb);
@@ -566,7 +590,7 @@ static int lua_client_command(lua_State *L) {
   nb_timers = 0;
   /* Is there callback? */
   int ltop = lua_isfunction(L, -1) ? lua_gettop(L) -1 : lua_gettop(L);
-  
+
   /* Redis cmd */
   for (i = 2; i <= ltop; i++) {
     if (lua_istable(L, i)) {
@@ -576,11 +600,11 @@ static int lua_client_command(lua_State *L) {
         lua_rawgeti(L, i, j + 1);
         argv[argc] = lua_tolstring(L, -1, &argvlen[argc]);
         lua_pop(L, 1);
-        
+
         if (argv[argc] == NULL) {
           return luaL_argerror(L, i, "command: Not a string or a number");
         }
-        
+
         if (++argc > LUA_MAX_STACK - 1) {
           return luaL_error(L, "command: Stack Overflow");
         }
@@ -604,7 +628,7 @@ static int lua_client_command(lua_State *L) {
       }
     }
   }
-  
+
   char *cmd;
   int len;
   len = redisFormatCommandArgv(&cmd,argc,argv,argvlen);
@@ -621,7 +645,7 @@ static int lua_client_command(lua_State *L) {
 
   if (strncasecmp(argv[0] + pvariant,"subscribe",9) == 0) {
 	  sub_mode = true;
-    
+
     /* Create callback with channels */
     if (create_callback(&cb, ref, argc - 1 + nb_timers) == 0) {
       /* Add every channel/pattern to the list of subscription callbacks. */
@@ -653,7 +677,7 @@ static int lua_client_command(lua_State *L) {
         if (create_timer_channel(&ch, ikey) == 0) {
           cb->channels[argc - 1 + k] = ch;
 	      }
-        
+
         int status;
         /* Add to list/tree */
         node_t *leaf = NULL;
@@ -661,7 +685,7 @@ static int lua_client_command(lua_State *L) {
           if (status != 2) {
             ch->flags |= CHANNEL_SUBSCRIBED;
           }
-          
+
           callback_ll_t* wrapper = NULL;
           if (wrap_cb(&wrapper, cb) == 0) {
             push_cb(&(leaf->cb_list), wrapper);
@@ -680,14 +704,14 @@ static int lua_client_command(lua_State *L) {
      * pattern that is unsubscribed will receive a message. This means we
     * should not append a callback function for this command. */
   } else {
-    
+
     if (strncasecmp(argv[0],"monitor",7) == 0) {
       /* Set monitor flag and push callback */
       cc->flags |= REDIS_MONITORING;
     }
-    
+
     callback_ll_t* wrapper = NULL;
-    if ( create_callback(&cb, ref, 0) == 0 
+    if ( create_callback(&cb, ref, 0) == 0
       && wrap_cb(&wrapper, cb) == 0 ) {
       push_cb(&cc->command_cb_list, wrapper);
     }
@@ -700,7 +724,7 @@ static int lua_client_command(lua_State *L) {
     uv_buf_t buf = uv_buf_init(cmd, len);
     req = (uv_write_t*)req_alloc();
     req->data = cc;
-    r = uv_write(req, sub_mode ? cc->sub_stream : cc->stream, 
+    r = uv_write(req, sub_mode ? cc->sub_stream : cc->stream,
         &buf, 1, on_write);
   }
   if (r == 0) {
@@ -708,19 +732,19 @@ static int lua_client_command(lua_State *L) {
   }
 
   /* Error */
-  if (!(cc->flags & REDIS_CONNECTED) 
-    || (cc->flags & (REDIS_DISCONNECTING | REDIS_FREEING)) 
+  if (!(cc->flags & REDIS_CONNECTED)
+    || (cc->flags & (REDIS_DISCONNECTING | REDIS_FREEING))
     || r < 0) {
 
    if (req != NULL ) {
      req_free((uv_req_t*)req);
    }
 
-   const char* error = r < 0 ? 
-				  uv_strerror(uv_last_error(uv_default_loop())) 
+   const char* error = r < 0 ?
+				  uv_strerror(r)
 				  : "command: Not connected";
 
-    /* Unref and call the callback (if there is) with error */	
+    /* Unref and call the callback (if there is) with error */
     callback_t cb;
     if(shift_cb(&cc->command_cb_list, &cb) == 0) {
       if (cb.ref != LUA_NOREF && cb.ref != LUA_REFNIL) {
@@ -757,11 +781,11 @@ static int lua_client_subscribe(lua_State *L) {
 #endif
 
   int top = lua_gettop(L);
-  
+
   int key_space_prefix_len = strlen(KEY_SPACE);
   int key_event_prefix_len = strlen(KEY_EVENT);
   int timer_event_prefix_len = strlen(TIMER_EVENT);
-  
+
   int i;
   for (i = 2; i <= top -1; i++) {
     const char *key;
@@ -795,7 +819,7 @@ static int lua_client_subscribe(lua_State *L) {
 		      break;
 	      }
 	    }
-    
+
       char *newkey = malloc((strlen(is_number ? TIMER_EVENT : event ? KEY_EVENT : KEY_SPACE) + strlen(key) + 1) * sizeof(char));
       if (newkey == NULL) {
         return luaL_error(L, "subscribe: Out Of Memory");
@@ -812,7 +836,7 @@ static int lua_client_subscribe(lua_State *L) {
   }
   lua_pushstring(L, "subscribe");
   lua_insert(L, 2);
-  
+
 #ifdef LUA_STACK_CHECK
   assert(lua_gettop(L) == vtop + 1);
 #endif
@@ -828,11 +852,11 @@ static int lua_client_on(lua_State *L) {
                            luaL_checkudata(L, 1, LUA_CLIENT_MT);
 
   const char *event_name = luaL_checkstring(L, 2);
-  
+
   if (lua_isfunction(L, -1)) {
 
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    
+
     if (strcmp(event_name, "error") == 0) {
       cc->r_error_cb = ref;
     } else if (strcmp(event_name, "connect") == 0) {
@@ -854,25 +878,30 @@ static int lua_client_on(lua_State *L) {
 
 static int lua_client_connect(lua_State *L) {
 #ifdef LUA_STACK_CHECK
-  stackDump(L);
   int top = lua_gettop(L);
 #endif
   client_context_t *cc = (client_context_t*)
                            luaL_checkudata(L, 1, LUA_CLIENT_MT);
+
+  /* Get the uv loop */
+  uv_loop_t* loop;
+  lua_pushstring(L, "uv_loop");
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  loop = lua_touserdata(L, -1);
 
   /* Initialize pipe */
   uv_pipe_t* stream = (uv_pipe_t*)malloc(sizeof(uv_pipe_t));
   if (stream == NULL) {
     return luaL_error(L, "new: Out Of Memory");
   }
-  uv_pipe_init(uv_default_loop(), stream, 0);
+  uv_pipe_init(loop, stream, 0);
 
   uv_pipe_t* sub_stream = (uv_pipe_t*)malloc(sizeof(uv_pipe_t));
   if (sub_stream == NULL) {
     return luaL_error(L, "new: Out Of Memory");
   }
-  uv_pipe_init(uv_default_loop(), sub_stream, 0);
-  
+  uv_pipe_init(loop, sub_stream, 0);
+
   cc->stream = (uv_stream_t*)stream;
   cc->sub_stream = (uv_stream_t*)sub_stream;
   cc->flags = 0;//&= ~REDIS_CONNECTED;
@@ -881,11 +910,12 @@ static int lua_client_connect(lua_State *L) {
   uv_connect_t* req = (uv_connect_t*)req_alloc();
   req->data = cc;
   uv_pipe_connect(req, (uv_pipe_t*)cc->stream, cc->path, on_connect);
-  
+
   uv_connect_t* sub_req = (uv_connect_t*)req_alloc();
   sub_req->data = cc;
   uv_pipe_connect(sub_req, (uv_pipe_t*)cc->sub_stream, cc->path, on_connect);
 
+	lua_pop(L,1);
   lua_pushvalue(L, 1);
 #ifdef LUA_STACK_CHECK
   assert(lua_gettop(L) == top + 1);
@@ -903,7 +933,7 @@ static int lua_client_exit(lua_State *L) {
 
   uv_close((uv_handle_t*)cc->stream, NULL);
   uv_close((uv_handle_t*)cc->sub_stream, NULL);
-  
+
   if (cc->r_connect_cb != LUA_NOREF && cc->r_connect_cb != LUA_REFNIL) {
     luaL_unref(cc->L, LUA_REGISTRYINDEX, cc->r_connect_cb);
   }
@@ -913,15 +943,15 @@ static int lua_client_exit(lua_State *L) {
   if (cc->r_disconnect_cb != LUA_NOREF && cc->r_disconnect_cb != LUA_REFNIL) {
     luaL_unref(cc->L, LUA_REGISTRYINDEX, cc->r_disconnect_cb);
   }
-  
+
   cc->stream_flags &= ~STREAM_CONNECTED;
   cc->stream_flags &= ~SUB_STREAM_CONNECTED;
-  
+
   destroy_tree(&cc->channels);
   destroy_tree(&cc->patterns);
   destroy_tree(&cc->timers);
   destroy_list(&cc->command_cb_list);
-  
+
   free(cc->stream);
   free(cc->sub_stream);
   free(cc->path);
@@ -942,7 +972,7 @@ static void on_disconnect(uv_handle_t* handle) {
 
   if (cc->stream_flags & STREAM_CONNECTED) {
     cc->stream_flags &= ~STREAM_CONNECTED;
-  } else if (!(cc->stream_flags & STREAM_CONNECTED) 
+  } else if (!(cc->stream_flags & STREAM_CONNECTED)
       && (cc->stream_flags & SUB_STREAM_CONNECTED)) {
 	  cc->stream_flags &= ~SUB_STREAM_CONNECTED;
   }
@@ -1005,7 +1035,7 @@ static int lua_client_new(lua_State *L) {
 
   // check if table
   luaL_checktype(L, 1, LUA_TTABLE);
-  
+
   /* Options */
   /* UDS path */
   lua_pushstring(L, "path");
@@ -1040,7 +1070,7 @@ static int lua_client_new(lua_State *L) {
   cc->command_cb_list = (callback_ends_t*)malloc(sizeof(callback_ends_t));
   cc->command_cb_list->head = NULL;
   cc->command_cb_list->tail = NULL;
-  
+
   luaL_getmetatable(L, LUA_CLIENT_MT);
   lua_setmetatable(L, -2);
 
@@ -1071,26 +1101,26 @@ static const struct luaL_Reg methods[] = {
 
 
 int luaopen_crazysnail(lua_State *L) {
-
+  //signal(SIGPIPE, SIG_IGN);
   luaL_newmetatable(L, LUA_CLIENT_MT);
   luaL_register(L, NULL, methods);
   luaL_register(L, NULL, functions);
   //lua_pop(L, 1);
   lua_pushvalue(L, -1);
   lua_setfield(L, -2, "__index");
-  
+
   //lua_newtable(L);
   //luaL_register(L, NULL, functions);
   return 1;
 }
 
 void stop_timer(uv_timer_t* req) {
-  uv_timer_stop(req);
+  int r = uv_timer_stop(req);
   req_free((uv_req_t*)req);
 }
 
-//static void buf_alloc(uv_handle_t* handle, size_t size, uv_buf_t* buf) {
-static uv_buf_t buf_alloc(uv_handle_t* handle, size_t size) {
+static void buf_alloc(uv_handle_t* handle, size_t size, uv_buf_t* buf) {
+
   buf_list_t* ab;
 
   ab = buf_freelist;
@@ -1098,12 +1128,11 @@ static uv_buf_t buf_alloc(uv_handle_t* handle, size_t size) {
     buf_freelist = ab->next;
   } else {
     ab = malloc(size + sizeof(*ab));
-    ab->uv_buf_t.len = size;
-    ab->uv_buf_t.base = (char*) (ab + 1);
+		ab->uv_buf_t.len = size;
+		ab->uv_buf_t.base = (char*) (ab + 1);
   }
 
-  //*buf = ab->uv_buf_t;
-  return ab->uv_buf_t;
+  *buf = ab->uv_buf_t;
 }
 
 
@@ -1145,15 +1174,15 @@ static void stackDump(lua_State *L) {
       case LUA_TSTRING:  /* strings */
         printf("`%s'", lua_tostring(L, i));
         break;
-    
+
       case LUA_TBOOLEAN:  /* booleans */
         printf(lua_toboolean(L, i) ? "true" : "false");
         break;
-    
+
       case LUA_TNUMBER:  /* numbers */
         printf("%g", lua_tonumber(L, i));
         break;
-    
+
       default:  /* other values */
         printf("%s", lua_typename(L, t));
         break;

@@ -29,8 +29,8 @@
 *.geany
 
 # Bin
-bin
-bin/*.luvit
+build
+build/*
 
 # Test
 test/tmp

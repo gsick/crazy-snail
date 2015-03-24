@@ -1,3 +1,0 @@
-[submodule "test/modules/luvit-test"]
-	path = test/modules/luvit-test
-	url = https://github.com/wscherphof/luvit-test.git

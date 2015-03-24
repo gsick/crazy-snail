@@ -23,10 +23,11 @@
 
 #ifndef __CRAZYSNAIL_H
 #define __CRAZYSNAIL_H
-#include <lua.h>
-#include <uv.h>
 #include <stdbool.h>
-
+#include "lua.h"
+#include "luaconf.h"
+#include "lauxlib.h"
+#include "uv.h"
 #include "cb.h"
 #include "hiredis-light.h"
 
@@ -59,17 +60,17 @@ typedef struct client_context_s {
   int r_disconnect_cb;
   /* List of Command Callback */
   callback_ends_t* command_cb_list;
-  
+
   /* Tree of Subscription Callback */
   node_t *channels;
   node_t *patterns;
   node_t *timers;
-  
+
   /* Flags */
   int flags;
   int stream_flags;
   /* Redis Protocol Reader */
-  redisReader *reader;  
+  redisReader *reader;
 } client_context_t;
 
 /* Request allocator */
