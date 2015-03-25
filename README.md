@@ -1,8 +1,16 @@
 crazy-snail
 ===========
 
+```
+migration to luvit 2 ongoing, a 0.0.1 version has been published on lit for linux x64
+dependencies = {
+    "gsick/crazy-snail@0.0.1"
+  },
+
+```
+
 Real-Time Luvit module based on [Redis](http://redis.io/).<br />
-This module is optimized for [Redis Keyspace Notifications](http://redis.io/topics/notifications) 
+This module is optimized for [Redis Keyspace Notifications](http://redis.io/topics/notifications)
 via Unix Domain Socket.<br />
 For basic Redis usage you may use [luvit-redis](https://github.com/tadeuszwojcik/luvit-redis)<br />
 It assume that your redis.conf is well configured.<br />
@@ -41,11 +49,18 @@ Beta version
 
 ## Synopsis
 
+Redis configuration:
+```
+unixsocket /var/run/redis/redis.sock
+unixsocketperm 755
+notify-keyspace-events KE$
+```
+
 ```lua
 local Timer = require('timer')
 local CrazySnail = require("crazy-snail")
 
-snail = CrazySnail.new({path = "/tmp/redis.sock"})
+snail = CrazySnail.new({path = "/var/run/redis/redis.sock"})
 
 snail:connect()
 
@@ -59,7 +74,7 @@ snail:on('connect', function()
       -- Two connections are automatically managed
       -- Others commands can easily be sent in a subscribed context
       snail:command("set", "Key4", "123", function(err, res)
-        if not err then 
+        if not err then
           print(res)
         end
       end)
@@ -76,14 +91,14 @@ snail:on('connect', function()
    -- Script subscription
   local script
   snail:command("script", "load", [[ return {KEYS[1],KEYS[2],ARGV[1],ARGV[2]} ]], function(err, res)
-    if not err then 
+    if not err then
       script = res
     end
   end)
 
   snail:subscribe(10000, "Key1", function(err, res)
     snail:command("EVALSHA", script, 2, "a", "b", 2, 3, function(err, res)
-      if err then 
+      if err then
         print(err)
       end
     end)
@@ -149,15 +164,15 @@ Subscribe to a Key-space, Key-event or Timer-event notification
 * `callback`: LUA_TFUNCTION
 
 List of Redis event:<br />
-`append`, `del`, 
+`append`, `del`,
 `expire`, `evicted`,
-`incrby`, `incrbyfloat`, 
+`incrby`, `incrbyfloat`,
 `hdel`, `hincrby`, `hincrbyfloat`, `hset`,
 `linsert`, `lpop`, `lpush`, `lset`, `ltrim`,
 `rename_from`, `rename_to`, `rpop`, `rpush`,
-`sadd`, `sdiffstore`, `set`, `setrange`, 
+`sadd`, `sdiffstore`, `set`, `setrange`,
 `sinterstore`, `sortstore`, `spop`, `srem`, `sunionostore`,
-`zadd`, `zincr`, `zinterstore`, `zrem`, `zrembyrank`, 
+`zadd`, `zincr`, `zinterstore`, `zrem`, `zrembyrank`,
 `zrembyscore`, `zunionstore`
 
 Examples:<br />
@@ -195,7 +210,7 @@ Execute a Redis command.
 snail:disconnect()
 ```
 
-Disconnect the client. Send a `disconnect` or `error` event. 
+Disconnect the client. Send a `disconnect` or `error` event.
 `connect` can be call safely after.
 
 ### exit
